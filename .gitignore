@@ -1,0 +1,35 @@
+# Build outputs
+bench/selfcheck
+bench/json_perf
+examples/cache_demo
+*.o
+*.a
+*.so
+*.d
+
+# Default make OUT=results artifacts
+/results.csv
+/results.machine.json
+/results.html
+
+# Local runs under results/ (keep committed baselines)
+/results/*
+!/results/baseline/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+*.user
+compile_commands.json
+.cache/

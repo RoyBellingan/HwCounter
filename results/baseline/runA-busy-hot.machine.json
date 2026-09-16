@@ -1,0 +1,28 @@
+{
+  "hostname": "6pack",
+  "kernel": "7.1.3-1-default",
+  "cpu_model": "AMD Ryzen 7 5700U with Radeon Graphics",
+  "vendor": "AuthenticAMD",
+  "microarch": "Zen2",
+  "cpu_family": "23",
+  "cpu_model_id": "104",
+  "stepping": "1",
+  "cpu_flags_md5": "7720af1ef79a",
+  "nproc": 1,
+  "smt_active": true,
+  "l3_topology": "0-7;8-15;",
+  "perf_event_paranoid": 2,
+  "pmu_slots_detected": 6,
+  "compiler": "gcc 16.1.1 20260717",
+  "comparability_key": "AuthenticAMD|23|104|1|7.1.3-1-default",
+  "pmu_aliases": {
+    "branch-instructions": "event=0xc2",
+    "branch-misses": "event=0xc3",
+    "cache-misses": "event=0x64,umask=0x09",
+    "cache-references": "event=0x60,umask=0xff",
+    "cpu-cycles": "event=0x76",
+    "instructions": "event=0xc0",
+    "stalled-cycles-frontend": "event=0xa9"
+  },
+  "unsupported_events": ["bus-cycles", "ref-cycles", "stalled-cycles-be", "L1d-write", "LLC-read", "LLC-read-miss", "LLC-write", "LLC-write-miss", "dTLB-write-miss"]
+}
