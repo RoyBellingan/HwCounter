@@ -19,14 +19,60 @@ MB/s delta           ±2.5%           <- report only
 ## Quick start
 
 ```sh
-git clone --depth 1 -b develop https://github.com/boostorg/json ../json
+make json-src                        # Boost.JSON at e93cf9c (UAT baseline)
 make
 make selfcheck                       # is this machine trustworthy?
-make bench JSON_ROOT=../json         # run it
+make bench                           # run it + write <OUT>.meta.json
 make short                           # quick compare
 make maxy                            # every counter
 make html                            # standalone HTML report
 ```
+
+## Multi-machine collector
+
+One Beast binary, two subcommands. Runners POST; the collector host also uses
+`hwc push` against itself. There is no direct SQLite import.
+
+```sh
+# on the collector host
+export HWC_TOKEN=change-me
+make serve TOKEN="$HWC_TOKEN" BIND=0.0.0.0 PORT=8080
+# UI: http://<host>:8080   views: Runs / Stability / Score
+
+# seed the two pre-SHA 6pack CSVs (label=historical, json_sha=unknown)
+make seed-historical TOKEN="$HWC_TOKEN" PUSH_URL=http://127.0.0.1:8080
+
+# on every runner, including the collector host
+make json-src
+make selfcheck
+for i in 1 2 3; do
+  make bench-push OUT=results/uat-$i \
+    JSON_SHA=e93cf9c254619142b9f3cfa9022b93fb1d4e5edb \
+    PUSH_URL=http://<collector>:8080 TOKEN="$HWC_TOKEN"
+done
+```
+
+`POST /api/runs` requires `Authorization: Bearer …` when `--token` is set, and
+rejects a body that is missing `json_sha` or `cxxflags`. Reads are open on the
+LAN. Payload is one JSON object `{meta, machine, rows}` — not multipart.
+
+SQLite lives at `data/hwc.sqlite` by default (WAL). Volume is small.
+
+### First UAT — pin this SHA
+
+Elect **`e93cf9c254619142b9f3cfa9022b93fb1d4e5edb`** as the baseline. Same
+`CXXFLAGS` (`-std=c++20 -O2 -g`) on every box. Three repeats per machine.
+
+Pass criteria, same host + same flags:
+
+- median `|ins/byte|` change across repeats ≈ 0
+- worst pool/null row `< 0.3%`
+- default-storage rows may show the known ~0.5–1.2% `pass_drift` — surface it
+- `GHz` / `MB/s` may move; they are diagnostics
+
+The Stability view colours CV: green `<0.1%`, amber `<1%`, red `≥1%`. Unknown
+SHAs are hidden there by default. The Score view is geomean
+`base_ins_per_byte / cand_ins_per_byte` (higher = fewer instructions).
 
 ## Portability — read this before running on a new machine
 
@@ -112,10 +158,15 @@ include/perf/events.hpp     portable catalog, runtime probing, slot detection,
                             pass planning, sysfs alias discovery
 include/perf/machine.hpp    machine fingerprint + comparability key
 include/perf/session.hpp    multi-pass recording, stitch validation, CSV
+include/hwc/                collector: derived metrics, CSV parse, SQLite, HTTP helpers
+src/hwc/                    Beast serve + push (one binary: ./hwc)
+web/                        Runs / Stability / Score UI (AJAX)
 bench/selfcheck.cpp         "can I trust this machine" — run on every new box
 bench/json_perf.cpp         Boost.JSON driver (parse pool/default/null, serialize)
 examples/cache_demo.cpp     minimal standalone example
-tools/report.py             short / maxy / diff / html
+tools/report.py             short / maxy / diff / html (local CLI only)
+tools/run_bench.sh          json_perf + <prefix>.meta.json
+tools/write_meta.py         identity sidecar (json_sha, cxxflags, pin, times)
 ```
 
 ## Output modes
@@ -142,6 +193,10 @@ re-running the benchmark.
 ```
 
 `html` — standalone self-contained page, sticky header, no external assets.
+
+Every `make bench` also writes `<prefix>.meta.json` (`json_sha`, `cxxflags`,
+pin, timestamps). The collector refuses a push without those two identity
+fields.
 
 ## CI notes
 

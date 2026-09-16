@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hwCounter — Boost.JSON</title>
+<script>
+(function () {
+  var p = localStorage.getItem("hwc-theme") || "system";
+  var dark = p === "dark" || (p !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+})();
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tabulator-tables@6.3.1/dist/css/tabulator.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css">
+<link rel="stylesheet" href="/app.css?v=s8">
+</head>
+<body>
+<header>
+  <div>
+    <h1>hwCounter</h1>
+    <p class="sub">Boost.JSON hardware counters · UAT baseline <code>e93cf9c</code></p>
+  </div>
+  <div class="header-end">
+    <nav>
+      <a href="#runs" data-view="runs">Runs</a>
+      <a href="#stability" data-view="stability">Stability</a>
+      <a href="#score" data-view="score">Score</a>
+    </nav>
+    <details class="theme-menu">
+      <summary aria-label="Theme">
+        <svg class="theme-sun" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.6" fill="currentColor"/>
+          <path fill="currentColor" d="M7.3 1h1.4v2.2H7.3zm0 11.8h1.4V15H7.3zM1 7.3h2.2v1.4H1zm11.8 0H15v1.4h-2.2zM3.1 2.5l1 .9-1.6 1.6-.9-1zm8.8 8.8 1 .9-1.6 1.6-.9-1zM3.5 12.9l.9-.9 1.6 1.6-1 .9zm8.4-8.4.9-.9 1.6 1.6-1 .9z"/>
+        </svg>
+        <svg class="theme-moon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <path fill="currentColor" d="M6.2 1.4a6.6 6.6 0 1 0 8 8.4A6.2 6.2 0 0 1 6.2 1.4z"/>
+        </svg>
+      </summary>
+      <div class="theme-menu-list" role="menu">
+        <button type="button" role="menuitemradio" data-theme-pref="light">Light</button>
+        <button type="button" role="menuitemradio" data-theme-pref="dark">Dark</button>
+        <button type="button" role="menuitemradio" data-theme-pref="system">System</button>
+      </div>
+    </details>
+  </div>
+</header>
+
+<section id="view-runs" class="view">
+  <div class="bar">
+    <label>host
+      <select id="runs-host" data-placeholder="any"><option></option></select>
+    </label>
+    <label>sha
+      <select id="runs-sha" data-placeholder="any"><option></option></select>
+    </label>
+    <label>label
+      <select id="runs-label" data-placeholder="any"><option></option></select>
+    </label>
+    <button id="runs-reload" type="button">Load</button>
+    <p class="legend pick-hint">Click a run as baseline · Ctrl/⌘-click a second as candidate — Score opens below.</p>
+  </div>
+  <div class="wrap">
+    <table id="runs-table">
+      <thead>
+        <tr>
+          <th class="t">id</th>
+          <th class="t">host</th>
+          <th class="t">sha</th>
+          <th class="t">compiler</th>
+          <th class="t">cxxflags</th>
+          <th>pin
+            <button type="button" class="col-help" aria-expanded="false" aria-label="About pin">?</button>
+            <span class="col-help-text" hidden>
+              <p>CPU this run was pinned to (<code>--pin N</code>).
+              A number is a logical CPU; <code>−1</code> means unpinned.</p>
+              <p>Pin inside one L3 domain for stable cycles and cache misses.
+              Instruction counts stay honest either way.</p>
+            </span>
+          </th>
+          <th class="t">when</th>
+          <th>n
+            <button type="button" class="col-help" aria-expanded="false" aria-label="About n">?</button>
+            <span class="col-help-text" hidden>
+              <p>How many sample rows this run stored — one per
+              dataset × setup × op (parse or serialize).</p>
+              <p>Click a run to see them. A full Boost.JSON bench is typically 56.</p>
+            </span>
+          </th>
+          <th>med ins/byte</th>
+          <th>drift vs first %
+            <button type="button" class="col-help" aria-expanded="false" aria-label="About drift vs first">?</button>
+            <span class="col-help-text" hidden>
+              <p>Median percent change in <code>ins/byte</code> versus the first
+              run with the same host, SHA, and <code>cxxflags</code>.</p>
+              <p>Per matching row:
+              <code>100 × (this − first) / first</code>,
+              then the median of those percents. The first run of that group is 0.</p>
+              <p><span class="pill ok">&lt;0.1%</span>
+              <span class="pill warn">&lt;1%</span>
+              <span class="pill bad">≥1%</span></p>
+            </span>
+          </th>
+          <th class="t">label</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="run-detail" hidden>
+    <h2 id="run-detail-title">Run</h2>
+    <p class="meta" id="run-detail-meta"></p>
+    <div class="wrap">
+      <table id="run-detail-table">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="view-stability" class="view" hidden>
+  <div class="bar">
+    <label>metric
+      <select id="stab-metric">
+        <option>ins/byte</option>
+        <option>cyc/byte</option>
+        <option>IPC</option>
+        <option>GHz</option>
+        <option>MB/s</option>
+        <option>ns/call</option>
+        <option>context-switches</option>
+        <option>page-faults</option>
+        <option>cpu-migrations</option>
+      </select>
+    </label>
+    <label>sha <input id="stab-sha" placeholder="e93cf9c…"></label>
+    <label>host <input id="stab-host" placeholder="any"></label>
+    <label class="chk"><input type="checkbox" id="stab-hide-unknown" checked> hide unknown sha</label>
+    <button id="stab-reload" type="button">Load</button>
+  </div>
+  <p class="legend">Same machine + SHA + flags: <span class="pill ok">CV &lt; 0.1%</span>
+    <span class="pill warn">CV &lt; 1%</span>
+    <span class="pill bad">CV ≥ 1%</span>
+    · pool/null should sit in green; default storage may show the known pass_drift.</p>
+  <h2>Per host</h2>
+  <div class="wrap">
+    <table id="stab-table">
+      <thead>
+        <tr>
+          <th class="t">host</th>
+          <th class="t">dataset</th>
+          <th class="t">setup
+            <button type="button" class="col-help" aria-expanded="false" aria-label="About setup">?</button>
+            <span class="col-help-text" hidden>
+              <p>If we actually do the work, and which allocator we use.</p>
+              <p><code>boost</code> — do actual work, default malloc.</p>
+              <p><code>boost (pool)</code> — do, monotonic memory pool.</p>
+              <p><code>boost (null)</code> — scan only: no DOM, no allocation.</p>
+            </span>
+          </th>
+          <th class="t">op</th>
+          <th>n</th>
+          <th>min</th>
+          <th>max</th>
+          <th>mean</th>
+          <th>CV %</th>
+          <th>pass_drift</th>
+          <th>ins_spread</th>
+          <th class="t">sha</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <h2>Across hosts (same SHA + flags)</h2>
+  <div class="wrap">
+    <table id="stab-xhost">
+      <thead>
+        <tr>
+          <th class="t">dataset</th>
+          <th class="t">setup
+            <button type="button" class="col-help" aria-expanded="false" aria-label="About setup">?</button>
+            <span class="col-help-text" hidden>
+              <p>If we actually do the work, and which allocator we use.</p>
+              <p><code>boost</code> — do actual work, default malloc.</p>
+              <p><code>boost (pool)</code> — do actual work, monotonic memory pool.</p>
+              <p><code>boost (null)</code> — scan only: no DOM, no allocation.</p>
+            </span>
+          </th>
+          <th class="t">op</th>
+          <th class="t">hosts</th>
+          <th>CV %</th>
+          <th class="t">comparable</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="view-score" class="view" hidden>
+  <div class="bar">
+    <label>baseline
+      <select id="score-base"><option value="">select a run…</option></select>
+    </label>
+    <label>candidate
+      <select id="score-cand"><option value="">select a run…</option></select>
+    </label>
+    <label>columns
+      <select id="score-preset">
+        <option value="gate">Gate — ins/byte</option>
+        <option value="time">Time — wall + MB/s</option>
+        <option value="core" selected>Core — gate + wall + IPC</option>
+        <option value="stalls">Stalls — frontend + cycles</option>
+        <option value="contention">Contention — ctx / faults / migrate</option>
+        <option value="full">Full</option>
+      </select>
+    </label>
+    <details class="col-picker">
+      <summary>show / hide</summary>
+      <div id="score-col-checks"></div>
+    </details>
+    <button id="score-reload" type="button">Compare</button>
+  </div>
+  <p class="legend">Pick two different runs. Big number is % change of the metric (candidate vs baseline). Colour is better <span class="pill ok">green</span> / worse <span class="pill bad">red</span> — wall and ins/byte are lower-is-better, so a drop is green. Colour darkens up to 15%. Small type is baseline over candidate. Wall time is the <code>wall ns/call</code> column — noisy, keep it off the gate.</p>
+  <p id="score-hint" class="hint">Select a baseline and a candidate to compare.</p>
+  <div id="score-summary" class="scorebox" hidden>
+    <div class="score-hero">
+      <div class="score-num" id="score-num">—</div>
+      <div class="score-lab">geomean base/cand ins/byte · &gt;1 fewer instructions</div>
+      <div class="score-stats">
+        <div><b id="score-within">—</b> rows within ±1%</div>
+        <div><b id="score-reg">—</b> regressions (&gt;+1% ins/byte)</div>
+      </div>
+      <div class="score-key">
+        Each cell: big type is % change of the metric
+        (candidate vs baseline). Colour is better/worse,
+        not the sign.
+        <span class="score-key-line is-base">top · baseline</span>
+        <span class="score-key-line is-cand">bottom · candidate</span>
+      </div>
+    </div>
+    <div id="score-who"></div>
+  </div>
+  <h2>Parse</h2>
+  <div class="wrap tab-wrap"><div id="score-parse"></div></div>
+  <h2>Serialize</h2>
+  <div class="wrap tab-wrap"><div id="score-serialize"></div></div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tabulator-tables@6.3.1/dist/js/tabulator.min.js"></script>
+<script src="/app.js?v=s8"></script>
+</body>
+</html>

@@ -12,52 +12,53 @@ Todo:
 
 * to proove that this is actually working, further test 2/3 case after gprof (should reduce branching) or other form of profiling
 
+* corosio later: per-worker counter groups; see §6.5.1 (mutex / stall proxies)
+
 
 ---
 
-## 0. Do this first tomorrow
+## 0. Do this first
 
-**The Boost.JSON clone was in the session scratchpad and is gone.** Re-clone it,
-and this time somewhere permanent:
-
-```sh
-cd /home/roy/Public
-git clone --depth 1 -b develop https://github.com/boostorg/json.git json
-cd hwCounter && make        # Makefile defaults to JSON_ROOT=../json
-```
-
-Also worth doing: **this is not a git repo yet.** `git init` before further
-changes — there is real work here now and no history.
+The tree is a git repo (`origin` = `RoyBellingan/HwCounter`). The Boost.JSON
+clone is still gone from `../json`. For UAT pin the elected SHA:
 
 ```sh
-cd /home/roy/Public/hwCounter && git init && git add -A && git commit -m "hwCounter: initial"
+make json-src                 # e93cf9c254619142b9f3cfa9022b93fb1d4e5edb
+make
+make selfcheck
+# collector host
+export HWC_TOKEN=change-me
+make serve TOKEN="$HWC_TOKEN"
+# other terminal / other machines
+for i in 1 2 3; do
+  make bench-push OUT=results/uat-$i PUSH_URL=http://127.0.0.1:8080 TOKEN="$HWC_TOKEN"
+done
 ```
+
+UI: http://127.0.0.1:8080 — Runs / Stability / Score. Historical 6pack CSVs
+seed with `make seed-historical` (`json_sha=unknown`; Stability hides them).
 
 ---
 
 ## 1. Where everything is
 
 ```
-include/perf/counters.hpp   RAII counter group; grouped atomic read; multiplexing-aware
-include/perf/events.hpp     portable event catalog, runtime probe, PMU slot detection,
-                            multi-pass planning, sysfs alias discovery
-include/perf/machine.hpp    machine fingerprint + comparability key
-include/perf/session.hpp    multi-pass recording, stitch validation, CSV emit
-bench/selfcheck.cpp         "can I trust this machine" — run on every new box
-bench/json_perf.cpp         Boost.JSON driver (parse pool/default/null, serialize)
-examples/cache_demo.cpp     minimal standalone example (sequential vs pointer chase)
-tools/report.py             short / compare / maxy / diff / html
-Makefile                    all targets
-README.md                   the primer + design rationale
-results/baseline/           the two runs captured so far
-results/counters.html       the published page (source of the artifact)
+include/perf/…              counter harness (unchanged)
+include/hwc/                collector helpers
+src/hwc/                    Beast binary: ./hwc serve | ./hwc push
+web/                        AJAX UI
+tools/run_bench.sh          json_perf + meta sidecar
+tools/write_meta.py         identity sidecar
+tools/seed_historical.sh    POST the two 6pack CSVs
+tools/report.py             local CLI tables
+results/baseline/           historical CSVs (pre-SHA; seed as unknown)
+data/hwc.sqlite             collector DB (gitignored)
 ```
 
-Published page (private, shareable from its share menu):
-**https://claude.ai/artifact/DC41eRiZ5bvG6pD75qCKn5**
-
-To update it from a future session, pass that URL as `url` to the Artifact tool —
-publishing without it creates a *separate* artifact instead of updating this one.
+Collector smoke-tested locally: two historical POSTs, 56 rows each, Stability
+CV on `apache_builds / boost / parse` = 0.0044% across busy-hot vs idle. Score
+geomean ≈ 1.000, 100% of rows within ±1%. Token-less POST → 401; empty
+`json_sha` → 400.
 
 ---
 
@@ -65,7 +66,9 @@ publishing without it creates a *separate* artifact instead of updating this one
 
 ```sh
 make selfcheck                       # verify the machine first, always
-make bench                           # full run, all 14 datasets (~50s at MINMS=60)
+make json-src                        # Boost.JSON @ e93cf9c
+make bench                           # full run + <OUT>.meta.json
+make bench-push PUSH_URL=http://host:8080 TOKEN=$HWC_TOKEN
 make short                           # quick table
 make maxy                            # all 30 columns
 make html                            # standalone page
@@ -295,18 +298,17 @@ forward; the `impl_def` table and the task-list loop are the only places to touc
 
 ### 6.4 Integrate with the existing CI benchmark page
 
-Current pipeline produces
-`https://benchmark.cppalliance.org/jsonbenchmarks-pullrequests/<PR>/pullrequest.html`.
-Two options, not yet decided:
+The local Score view (`./hwc serve` → `#score`) is the stand-in for
+`https://benchmark.cppalliance.org/jsonbenchmarks-pullrequests/<PR>/pullrequest.html`:
+geomean `ins/byte` vs a baseline run (default: latest `e93cf9c` on the same
+host+compiler). Upstream wall-clock charts are still a separate pipeline.
+
+Two options if this ever has to land on cppalliance.org:
 
 - **(a)** Patch upstream `bench.cpp` to emit counters directly — hook point is the
   `f()` call inside `bench()` around `vi[j].get()->bench(verb, vf[i], repeat)`,
   wrapping the whole `run_for` so counts cover `result.calls` invocations.
-- **(b)** Keep `json_perf` as a separate driver and publish a second page.
-
-(b) is lower risk and is what exists now. (a) gets counters for *all* the
-implementations for free, including rapidjson/nlohmann, and reuses upstream's
-trial/discard statistics.
+- **(b)** Keep `json_perf` + `hwc` as the second page. That is what exists now.
 
 ### 6.5 capy and Beast2 — the threading problem
 
@@ -324,14 +326,36 @@ For I/O-shaped work like Beast2, add the software events
 (`context-switches`, `page-faults`, `cpu-migrations`) — they cost no PMU slot and
 are always available.
 
+### 6.5.1 Mutex / contention (for later, including corosio)
+
+Corosio feedback: instruction counts can make a library look very fast while
+wall clock is less flattering. Frontend stalls were already on their radar.
+There is **no portable “mutex wait” PMU event**. What we already have is the
+proxy:
+
+- **Sleeping lock** (pthread mutex / futex): `context-switches` rises,
+  wall clock >> `task-clock`, instruction count stays flat. That is the
+  “instructions look great, wall clock does not” story.
+- **Spinlock / cache-line ping-pong:** switches stay 0, IPC drops, cycles and
+  wall go up, instructions still flat. `L1d-read-miss` / `cache-misses` move.
+- **Frontend stall:** `fe-stall%` = `stalled-cycles-fe / cycles`. We measure
+  it. **Backend stall is not available on this AMD** (7900X3D and the 5700U).
+- **Off-core / SMT:** `cpu-migrations`; pin within one L3 domain
+  (`0-5,12-17` vs `6-11,18-23` on the 7900X3D).
+
+`json_perf` will not show lock contention — it is one thread. For corosio you
+will need a `counter_group` per worker and then look at switches + IPC +
+`fe-stall%` next to wall time. Not doing that while JSON UAT is the focus.
+
 ### 6.6 Smaller items
 
 - CI containers need `--cap-add=PERFMON` (older kernels `SYS_ADMIN`) or
   `perf_event_open` returns `EACCES`. `selfcheck` already reports this.
 - Many cloud VMs expose no vPMU or only 1–2 slots → many passes, long runs.
   `selfcheck` warns; decide a policy for those runners.
-- Baseline storage: store per-benchmark `ins/byte` baselines as JSON in-repo,
-  re-baseline in dedicated commits so the diff shows who moved the number.
+- Baseline storage: the collector SQLite store is the live baseline; the UAT
+  SHA is `e93cf9c254619142b9f3cfa9022b93fb1d4e5edb`. Re-baseline by pointing
+  Score at a new SHA, not by rewriting in-repo JSON.
 - `report.py` has a `compare` column set used by the HTML page but no CLI mode
   for it — add `report.py compare a.csv b.csv` if useful.
 

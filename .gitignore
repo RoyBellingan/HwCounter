@@ -2,6 +2,8 @@
 bench/selfcheck
 bench/json_perf
 examples/cache_demo
+/hwc
+/data/
 *.o
 *.a
 *.so
@@ -10,11 +12,13 @@ examples/cache_demo
 # Default make OUT=results artifacts
 /results.csv
 /results.machine.json
+/results.meta.json
 /results.html
 
 # Local runs under results/ (keep committed baselines)
 /results/*
 !/results/baseline/
+/results/baseline/*.meta.json
 
 # Python
 __pycache__/
