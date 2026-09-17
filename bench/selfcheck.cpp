@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <vector>
 
@@ -102,6 +103,15 @@ int main() {
     if (mi.pmu_slots <= 2)
         warn("very few PMU slots - likely a VM with a restricted vPMU; "
              "expect many passes and longer runs");
+    auto refs = perf::reference_events(passes);
+    std::size_t core = 0;
+    for (auto const& e : sup) if (e.core) ++core;
+    if (passes.size() > 1 && refs == 0)
+        warn("no reference event fits in every pass - pass_drift cannot be "
+             "checked; stitched columns are unverified");
+    else if (refs < core)
+        warn("only " + std::to_string(refs) + " of " + std::to_string(core) +
+             " core events fit in every pass - some core events are rotated");
 
     std::cout << "\n=== determinism ===\n";
     (void)measure_instructions(v);  // warm
@@ -122,44 +132,49 @@ int main() {
     CPU_ZERO(&orig);
     sched_getaffinity(0, sizeof orig, &orig);
     std::vector<int> cpus;
-    for (int c = 0; c < mi.nproc; ++c) if (CPU_ISSET(c, &orig)) cpus.push_back(c);
+    // Walk the whole mask: allowed CPU ids need not start at 0.
+    for (int c = 0; c < CPU_SETSIZE; ++c) if (CPU_ISSET(c, &orig)) cpus.push_back(c);
 
+    auto pin = [](int c) {
+        cpu_set_t s; CPU_ZERO(&s); CPU_SET(c, &s);
+        return sched_setaffinity(0, sizeof s, &s) == 0;
+    };
     if (cpus.size() < 2) {
         warn("only one CPU available - migration check skipped");
+    } else if (!pin(cpus.front())) {
+        fail("could not pin to cpu" + std::to_string(cpus.front()) +
+             " - migration check is not valid");
     } else {
-        auto pin = [](int c) {
-            cpu_set_t s; CPU_ZERO(&s); CPU_SET(c, &s);
-            return sched_setaffinity(0, sizeof s, &s) == 0;
-        };
-        pin(cpus.front());
         double a = measure_instructions(v);
         // Count across a forced migration to the most distant CPU available.
         perf::counter_group g;
         g.add(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
         g.reset(); g.enable();
         volatile auto x1 = workload(v, ++seed_counter); (void)x1;
-        pin(cpus.back());
+        bool moved = pin(cpus.back());
         volatile auto x2 = workload(v, ++seed_counter); (void)x2;
         g.disable();
         double both = double(g.read().values[0]);
-        sched_setaffinity(0, sizeof orig, &orig);
 
         double expect = 2 * a, err = std::abs(both - expect) / expect;
         std::cout << "  cpu" << cpus.front() << " single : " << std::setprecision(0) << a << "\n"
                   << "  cpu" << cpus.front() << "->cpu" << cpus.back()
                   << " both: " << both << "   (expected ~" << expect << ", error "
                   << std::setprecision(3) << (err * 100) << "%)\n";
-        if (err < 0.01) pass("counters survive CPU migration - pinning not required "
-                             "for instruction gating");
+        if (!moved) fail("could not move to cpu" + std::to_string(cpus.back()) +
+                         " - migration check is not valid");
+        else if (err < 0.01) pass("counters survive CPU migration - pinning not required "
+                                  "for instruction gating");
         else fail("counts lost across migration - pin the benchmark process");
     }
+    sched_setaffinity(0, sizeof orig, &orig);
 
     std::cout << "\n=== stability advice ===\n";
     if (mi.smt) warn("SMT is on - a sibling thread shares the core's PMU-visible "
                      "resources; pin to one CPU per physical core, or disable SMT");
     else pass("SMT off");
-    std::string gov = perf::detail::run(
-        "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null");
+    std::string gov = perf::detail::slurp(
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
     if (!gov.empty()) {
         if (gov == "performance") pass("cpufreq governor = performance");
         else warn("cpufreq governor = " + gov +

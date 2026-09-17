@@ -53,11 +53,22 @@ inline boost::json::object derived_of(boost::json::object const& row) {
     d["MB/s"]     = (bytes / ns) * 1000.0;
     d["ins/byte"] = ins ? num_or_null(*ins / bytes) : boost::json::value(nullptr);
     d["cyc/byte"] = cyc ? num_or_null(*cyc / bytes) : boost::json::value(nullptr);
-    if (ins && cyc && *cyc != 0)
+    // IPC and GHz are ratios, so both values must come from one sample.
+    // New CSVs carry best_ipc / best_ghz from the best-time rep. Old CSVs do
+    // not; then fall back to the ratio of per-event minima.
+    //
+    // GHz = user-mode cycles / task-clock ns. Hardware events exclude the
+    // kernel, task-clock does not, so kernel time in the loop lowers GHz. It
+    // is not the clock frequency of the part.
+    if (auto v = get_num(row, "best_ipc"))
+        d["IPC"] = *v;
+    else if (ins && cyc && *cyc != 0)
         d["IPC"] = *ins / *cyc;
     else
         d["IPC"] = nullptr;
-    if (cyc && tc && *tc != 0)
+    if (auto v = get_num(row, "best_ghz"))
+        d["GHz"] = *v;
+    else if (cyc && tc && *tc != 0)
         d["GHz"] = *cyc / *tc;
     else
         d["GHz"] = nullptr;

@@ -15,6 +15,10 @@ namespace hwc {
 inline constexpr char const* kUatBaselineSha =
     "e93cf9c254619142b9f3cfa9022b93fb1d4e5edb";
 
+// Shortest SHA prefix a filter may use. Shorter text must match exactly, so
+// "e" does not select every run.
+inline constexpr std::size_t kMinShaPrefix = 7;
+
 struct Query {
     std::string hostname, json_sha, compiler, cxxflags, label, metric;
     bool hide_unknown = true;
@@ -41,6 +45,10 @@ public:
 private:
     sqlite3* db_ = nullptr;
     void exec(char const* sql);
+    void migrate();
+    // Store median ins/byte and median drift vs the first run with the same
+    // (hostname, json_sha, cxxflags), so list_runs does not read samples.
+    void refresh_run_summary(std::int64_t run_id);
     std::int64_t upsert_machine(boost::json::object const& machine);
 };
 

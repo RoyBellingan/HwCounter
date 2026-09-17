@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
@@ -165,7 +166,8 @@ double cv_pct(std::vector<double> const& v) {
 
 bool sha_match(std::string const& have, std::string const& want) {
     if (want.empty()) return true;
-    if (have.size() >= want.size() && have.compare(0, want.size(), want) == 0)
+    if (want.size() >= kMinShaPrefix && have.size() >= want.size() &&
+        have.compare(0, want.size(), want) == 0)
         return true;
     return have == want;
 }
@@ -191,6 +193,9 @@ struct RunRec {
     std::string cpu_model, comparability_key, machine_json;
     int pin = -1, reps = 0;
     double min_ms = 0;
+    double median_ins_byte = std::numeric_limits<double>::quiet_NaN();
+    double median_drift_pct = std::numeric_limits<double>::quiet_NaN();
+    int n_samples = -1;
 };
 
 class Stmt {
@@ -297,9 +302,11 @@ Store::Store(std::string path) {
         db_ = nullptr;
         throw std::runtime_error(e);
     }
+    sqlite3_busy_timeout(db_, 5000);
     exec("PRAGMA foreign_keys = ON");
     exec("PRAGMA journal_mode = WAL");
     exec(kSchema);
+    migrate();
 }
 
 Store::~Store() {
@@ -439,6 +446,7 @@ Store::InsertResult Store::insert_run(boost::json::value const& body) {
                 throw std::runtime_error(std::string("insert sample: ") + sqlite3_errmsg(db_));
             ++r.n_samples;
         }
+        refresh_run_summary(r.id);
         exec("COMMIT");
     } catch (...) {
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
@@ -470,13 +478,17 @@ RunRec load_run_row(Stmt& st) {
     r.cpu_model = st.col_text(16);
     r.comparability_key = st.col_text(17);
     r.machine_json = st.col_text(18);
+    r.median_ins_byte = st.col_dbl(19);
+    r.median_drift_pct = st.col_dbl(20);
+    r.n_samples = sqlite3_column_type(st.get(), 21) == SQLITE_NULL ? -1 : st.col_int(21);
     return r;
 }
 
 char const* kRunJoin =
     "SELECT r.id,r.created_at,r.machine_id,r.hostname,r.json_sha,r.json_ref,r.hwc_sha,"
     "r.compiler,r.cxxflags,r.pin,r.min_ms,r.reps,r.label,r.note,r.started_at,r.finished_at,"
-    "m.cpu_model,m.comparability_key,m.machine_json "
+    "m.cpu_model,m.comparability_key,m.machine_json,"
+    "r.median_ins_byte,r.median_drift_pct,r.n_samples "
     "FROM runs r JOIN machines m ON m.id=r.machine_id";
 
 std::vector<RunRec> load_runs(sqlite3* db, Query const& q) {
@@ -529,43 +541,108 @@ std::optional<double> sample_metric(Sample const& s, std::string const& metric) 
 
 }  // namespace
 
+void Store::migrate() {
+    std::map<std::string, bool> have;
+    {
+        Stmt st(db_, "PRAGMA table_info(runs)");
+        while (st.step() == SQLITE_ROW) have[st.col_text(1)] = true;
+    }
+    if (!have.count("median_ins_byte"))
+        exec("ALTER TABLE runs ADD COLUMN median_ins_byte REAL");
+    if (!have.count("median_drift_pct"))
+        exec("ALTER TABLE runs ADD COLUMN median_drift_pct REAL");
+    if (!have.count("n_samples"))
+        exec("ALTER TABLE runs ADD COLUMN n_samples INTEGER");
+
+    // One sample per (run, dataset, impl, op). Old databases can hold
+    // duplicates; then keep running without the index and say so.
+    char* err = nullptr;
+    if (sqlite3_exec(db_,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_key "
+            "ON samples(run_id, dataset, impl, op)",
+            nullptr, nullptr, &err) != SQLITE_OK) {
+        std::fprintf(stderr, "hwc: warning: duplicate samples in DB, unique index "
+                             "not created: %s\n", err ? err : "?");
+        sqlite3_free(err);
+    }
+
+    std::vector<std::int64_t> todo;
+    {
+        Stmt st(db_, "SELECT id FROM runs WHERE n_samples IS NULL ORDER BY id");
+        while (st.step() == SQLITE_ROW) todo.push_back(st.col_i64(0));
+    }
+    if (todo.empty()) return;
+    exec("BEGIN IMMEDIATE");
+    try {
+        for (auto id : todo) refresh_run_summary(id);
+        exec("COMMIT");
+    } catch (...) {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw;
+    }
+}
+
+void Store::refresh_run_summary(std::int64_t run_id) {
+    auto run = load_run_id(db_, run_id);
+    if (!run) throw std::runtime_error("run not found");
+
+    auto ins_by_key = [&](std::int64_t id) {
+        std::map<Key, double> m;
+        for (auto const& s : load_samples_for(db_, id))
+            if (auto ib = sample_metric(s, "ins/byte"))
+                m[Key{s.dataset, s.impl, s.op}] = *ib;
+        return m;
+    };
+    auto mine = ins_by_key(run_id);
+    std::vector<double> ibs;
+    for (auto const& [k, v] : mine) ibs.push_back(v);
+
+    std::int64_t first = run_id;
+    {
+        Stmt st(db_, "SELECT MIN(id) FROM runs WHERE hostname=? AND json_sha=? AND cxxflags=?");
+        st.bind_text(1, run->hostname);
+        st.bind_text(2, run->json_sha);
+        st.bind_text(3, run->cxxflags);
+        if (st.step() == SQLITE_ROW && sqlite3_column_type(st.get(), 0) != SQLITE_NULL)
+            first = st.col_i64(0);
+    }
+    std::vector<double> drifts;
+    if (first == run_id) {
+        drifts.push_back(0);
+    } else {
+        auto base = ins_by_key(first);
+        for (auto const& [k, v] : mine) {
+            auto b = base.find(k);
+            if (b != base.end() && b->second != 0)
+                drifts.push_back(100.0 * (v - b->second) / b->second);
+        }
+    }
+
+    int n = 0;
+    {
+        Stmt st(db_, "SELECT COUNT(*) FROM samples WHERE run_id=?");
+        st.bind_i64(1, run_id);
+        if (st.step() == SQLITE_ROW) n = st.col_int(0);
+    }
+    Stmt up(db_, "UPDATE runs SET median_ins_byte=?, median_drift_pct=?, n_samples=? WHERE id=?");
+    up.bind_dbl(1, median(ibs));
+    up.bind_dbl(2, median(drifts));
+    up.bind_int(3, n);
+    up.bind_i64(4, run_id);
+    if (up.step() != SQLITE_DONE)
+        throw std::runtime_error(std::string("update run summary: ") + sqlite3_errmsg(db_));
+}
+
 boost::json::value Store::list_runs(Query const& q) {
     Query q2 = q;
     q2.hide_unknown = false;  // list shows everything; UI can filter
     auto runs = load_runs(db_, q2);
-    // first run of (host, sha, flags) for drift
-    std::map<std::tuple<std::string, std::string, std::string>, std::int64_t> first;
-    std::map<std::int64_t, std::map<Key, double>> ins;
-    for (auto const& r : runs) {
-        auto key = std::make_tuple(r.hostname, r.json_sha, r.cxxflags);
-        if (!first.count(key)) first[key] = r.id;
-        auto ss = load_samples_for(db_, r.id);
-        for (auto const& s : ss) {
-            auto ib = sample_metric(s, "ins/byte");
-            if (ib) ins[r.id][Key{s.dataset, s.impl, s.op}] = *ib;
-        }
-    }
     boost::json::array arr;
     for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
         auto const& r = *it;
-        auto samples = ins[r.id];
-        std::vector<double> ibs, drifts;
-        for (auto const& [k, v] : samples) ibs.push_back(v);
-        auto fk = std::make_tuple(r.hostname, r.json_sha, r.cxxflags);
-        auto fid = first[fk];
-        if (fid != r.id) {
-            auto const& base = ins[fid];
-            for (auto const& [k, v] : samples) {
-                auto b = base.find(k);
-                if (b != base.end() && b->second != 0)
-                    drifts.push_back(100.0 * (v - b->second) / b->second);
-            }
-        } else {
-            drifts.push_back(0);
-        }
-        auto o = run_json(r, static_cast<int>(samples.size()));
-        o["median_ins_byte"] = num_or_null(median(ibs));
-        o["median_drift_pct"] = num_or_null(median(drifts));
+        auto o = run_json(r, r.n_samples);
+        o["median_ins_byte"] = num_or_null(r.median_ins_byte);
+        o["median_drift_pct"] = num_or_null(r.median_drift_pct);
         arr.push_back(std::move(o));
     }
     boost::json::object out;
@@ -779,28 +856,30 @@ boost::json::value Store::compare(std::optional<std::int64_t> base_id,
     auto cand = pick_cand();
     if (!cand) throw std::runtime_error("no candidate run");
 
+    // Instruction counts are only comparable when the same compiler and
+    // flags built both runs. The default pick never crosses that line.
+    auto same_build = [](RunRec const& a, RunRec const& b) {
+        return a.compiler == b.compiler && a.cxxflags == b.cxxflags;
+    };
     auto pick_base = [&]() -> std::optional<RunRec> {
         if (base_id) return load_run_id(db_, *base_id);
-        std::optional<RunRec> any_base, same_host;
+        std::optional<RunRec> any_host;
         for (auto it = all.rbegin(); it != all.rend(); ++it) {
-            if (it->id == cand->id) continue;
-            if (!sha_match(it->json_sha, kUatBaselineSha) &&
-                it->json_sha != kUatBaselineSha)
-                continue;
-            if (!any_base) any_base = *it;
-            if (it->hostname == cand->hostname && it->compiler == cand->compiler) {
-                same_host = *it;
-                break;
-            }
+            if (it->id == cand->id || it->json_sha != kUatBaselineSha) continue;
+            if (!same_build(*it, *cand)) continue;
+            if (it->hostname == cand->hostname) return *it;
+            if (!any_host) any_host = *it;
         }
-        if (same_host) return same_host;
-        if (any_base) return any_base;
-        for (auto const& r : all)
-            if (r.id != cand->id && r.hostname == cand->hostname) return r;
+        if (any_host) return any_host;
+        for (auto it = all.rbegin(); it != all.rend(); ++it)
+            if (it->id != cand->id && it->hostname == cand->hostname &&
+                same_build(*it, *cand))
+                return *it;
         return std::nullopt;
     };
     auto base = pick_base();
-    if (!base) throw std::runtime_error("no baseline run");
+    if (!base)
+        throw std::runtime_error("no baseline run with the same compiler and cxxflags");
 
     auto bs = load_samples_for(db_, base->id);
     auto cs = load_samples_for(db_, cand->id);
@@ -808,7 +887,21 @@ boost::json::value Store::compare(std::optional<std::int64_t> base_id,
     for (auto& s : bs) bm[Key{s.dataset, s.impl, s.op}] = s;
     for (auto& s : cs) cm[Key{s.dataset, s.impl, s.op}] = s;
 
-    bool comparable = base->comparability_key == cand->comparability_key;
+    bool const ins_comparable = same_build(*base, *cand);
+    bool const comparable =
+        ins_comparable && base->comparability_key == cand->comparability_key;
+    boost::json::array warnings;
+    if (base->compiler != cand->compiler)
+        warnings.push_back(boost::json::value("compiler differs: instruction deltas "
+                                              "include compiler changes"));
+    if (base->cxxflags != cand->cxxflags)
+        warnings.push_back(boost::json::value("cxxflags differ: instruction deltas "
+                                              "include flag changes"));
+    if (base->comparability_key != cand->comparability_key)
+        warnings.push_back(boost::json::value("machine or kernel differs: cycle and "
+                                              "cache columns are diagnostic only"));
+    if (base->hostname != cand->hostname)
+        warnings.push_back(boost::json::value("different hosts"));
     boost::json::array parse, serialize;
     std::vector<double> logs;
     int n = 0, within = 0, regressions = 0;
@@ -886,6 +979,8 @@ boost::json::value Store::compare(std::optional<std::int64_t> base_id,
     out["base"] = run_json(*base, static_cast<int>(bs.size()));
     out["cand"] = run_json(*cand, static_cast<int>(cs.size()));
     out["comparable"] = comparable;
+    out["instructions_comparable"] = ins_comparable;
+    out["warnings"] = std::move(warnings);
     out["score"] = num_or_null(score);
     out["within_1pct"] = n ? 100.0 * within / n : 0.0;
     out["regressions"] = regressions;
@@ -895,20 +990,15 @@ boost::json::value Store::compare(std::optional<std::int64_t> base_id,
 }
 
 boost::json::value Store::metrics() {
-    Stmt st(db_, "SELECT counters_json FROM samples LIMIT 200");
+    // Every counter name in any sample, not only the first few rows.
+    Stmt st(db_,
+        "SELECT DISTINCT j.key FROM samples, json_each(samples.counters_json) AS j "
+        "WHERE j.type != 'null' ORDER BY j.key");
     std::map<std::string, int> names;
     names["instructions"] = 1;
     names["cycles"] = 1;
     names["task-clock-ns"] = 1;
-    while (st.step() == SQLITE_ROW) {
-        auto t = st.col_text(0);
-        if (t.empty()) continue;
-        auto v = boost::json::parse(t);
-        if (!v.is_object()) continue;
-        for (auto const& [k, val] : v.as_object()) {
-            if (!val.is_null()) names[std::string(k)] = 1;
-        }
-    }
+    while (st.step() == SQLITE_ROW) names[st.col_text(0)] = 1;
     boost::json::array ev;
     for (auto const& [k, _] : names) ev.push_back(boost::json::value(k));
     boost::json::object out;

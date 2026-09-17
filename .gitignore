@@ -37,3 +37,6 @@ venv/
 *.user
 compile_commands.json
 .cache/
+
+# Unit tests
+test/unit_tests

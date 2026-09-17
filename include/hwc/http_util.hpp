@@ -1,7 +1,10 @@
 #pragma once
 
 #include <boost/json.hpp>
+#include <algorithm>
 #include <cstdint>
+#include <filesystem>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -80,16 +83,63 @@ inline Url parse_http_url(std::string s) {
     auto slash = s.find('/');
     std::string hp = slash == std::string::npos ? s : s.substr(0, slash);
     u.path = slash == std::string::npos ? "/" : s.substr(slash);
-    auto colon = hp.rfind(':');
-    if (colon != std::string::npos) {
-        u.host = hp.substr(0, colon);
-        u.port = hp.substr(colon + 1);
+    std::string port;
+    if (!hp.empty() && hp.front() == '[') {
+        // IPv6 literal: [addr] or [addr]:port
+        auto close = hp.find(']');
+        if (close == std::string::npos)
+            throw std::runtime_error("unterminated [ in URL host");
+        u.host = hp.substr(1, close - 1);
+        auto rest = hp.substr(close + 1);
+        if (!rest.empty()) {
+            if (rest.front() != ':')
+                throw std::runtime_error("bad text after ] in URL host");
+            port = rest.substr(1);
+        }
     } else {
-        u.host = hp;
+        auto colon = hp.find(':');
+        if (colon != std::string::npos && hp.find(':', colon + 1) != std::string::npos)
+            throw std::runtime_error("IPv6 host must be in brackets: http://[::1]:8080");
+        if (colon != std::string::npos) {
+            u.host = hp.substr(0, colon);
+            port = hp.substr(colon + 1);
+        } else {
+            u.host = hp;
+        }
+    }
+    if (!port.empty()) {
+        if (port.find_first_not_of("0123456789") != std::string::npos)
+            throw std::runtime_error("bad port in URL: " + port);
+        u.port = port;
     }
     if (u.host.empty()) throw std::runtime_error("empty host in URL");
     if (u.path.empty()) u.path = "/";
     return u;
+}
+
+// Compare without an early exit, so the time does not show how many leading
+// bytes of a guessed token were right.
+inline bool constant_time_equal(std::string_view a, std::string_view b) {
+    unsigned char diff = a.size() == b.size() ? 0 : 1;
+    std::size_t const n = std::max(a.size(), b.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        unsigned char x = i < a.size() ? static_cast<unsigned char>(a[i]) : 0;
+        unsigned char y = i < b.size() ? static_cast<unsigned char>(b[i]) : 0;
+        diff |= static_cast<unsigned char>(x ^ y);
+    }
+    return diff == 0;
+}
+
+// True if `full` is `root` or is below it. Compares path elements, so
+// /tmp/website is NOT inside /tmp/web. Both paths must be canonical.
+inline bool path_within(std::filesystem::path const& root,
+                        std::filesystem::path const& full) {
+    auto r = root.begin(), f = full.begin();
+    for (; r != root.end(); ++r, ++f) {
+        if (r->empty() && std::next(r) == root.end()) break;  // trailing '/'
+        if (f == full.end() || *r != *f) return false;
+    }
+    return true;
 }
 
 }  // namespace hwc

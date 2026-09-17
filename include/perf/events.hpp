@@ -12,6 +12,7 @@
 #include "counters.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
@@ -111,33 +112,46 @@ probe_supported(std::vector<event_def> const& in,
 }
 
 // How many PMU events can run concurrently before the kernel starts
-// time-multiplexing? Determined empirically: open N duplicate general-purpose
-// events, do a little work, and ask whether enabled == running.
-inline int detect_pmu_slots(int cap = 12) {
-    int best = 1;
-    for (int n = 1; n <= cap; ++n) {
+// time-multiplexing? Determined empirically: open the first N DISTINCT
+// hardware events from `supported`, do a little work, and ask whether
+// enabled == running. Duplicates of one event are not used: some PMUs share
+// or duplicate a counter for identical events, which over-counts the slots.
+// If fewer distinct events exist than real slots, the result is low. That is
+// safe: it only adds passes.
+inline int detect_pmu_slots(std::vector<event_def> const& supported, int cap = 12) {
+    std::vector<event_def> hw;
+    for (auto const& e : supported)
+        if (e.pmu) hw.push_back(e);
+    int best = 0;
+    int const limit = std::min(cap, int(hw.size()));
+    for (int n = 1; n <= limit; ++n) {
         try {
             counter_group g;
-            for (int i = 0; i < n; ++i)
-                g.add(PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS);
+            for (int i = 0; i < n; ++i) g.add(hw[i].type, hw[i].config);
             g.reset();
             g.enable();
             std::uint64_t volatile s = 0;
             for (int i = 0; i < 200000; ++i) s += std::uint64_t(i);
             g.disable();
-            if (g.read().multiplexed()) break;
+            auto r = g.read();
+            if (r.multiplexed() || r.time_running == 0) break;
             best = n;
         } catch (...) {
             break;
         }
     }
-    return best;
+    return std::max(best, 1);
 }
 
 // Split the events into passes that each fit the PMU without multiplexing.
 // Core events (instructions, cycles) are repeated in every pass: they are the
 // cross-pass consistency check, since the same workload must retire the same
 // instruction count in each pass. Software events are free and ride along.
+//
+// With few slots not all core events fit next to a rotated event. Then core
+// events are dropped from the reference set, last first, and rotated like the
+// others. With one slot there is no reference: every event gets its own pass
+// and the stitch check (pass_drift) cannot run.
 inline std::vector<std::vector<event_def>>
 plan_passes(std::vector<event_def> const& supported, int slots) {
     std::vector<event_def> core, rot, soft;
@@ -146,8 +160,18 @@ plan_passes(std::vector<event_def> const& supported, int slots) {
         else if (e.core) core.push_back(e);
         else             rot.push_back(e);
     }
+    slots = std::max(1, slots);
 
-    int const per_pass = std::max(1, slots - int(core.size()));
+    // Everything fits in one pass: keep all core events. Otherwise leave at
+    // least one slot per pass for rotated events, so per_pass >= 1.
+    std::size_t keep = core.size();
+    if (core.size() + rot.size() > std::size_t(slots))
+        keep = std::min(core.size(), std::size_t(slots - 1));
+    // Demoted core events are rotated first, so they stay near the front.
+    rot.insert(rot.begin(), core.begin() + keep, core.end());
+    core.resize(keep);
+
+    std::size_t const per_pass = std::size_t(slots) - core.size();
     std::vector<std::vector<event_def>> passes;
     for (std::size_t i = 0; i < rot.size(); i += per_pass) {
         std::vector<event_def> p = core;
@@ -161,25 +185,36 @@ plan_passes(std::vector<event_def> const& supported, int slots) {
     return passes;
 }
 
+// Number of core (reference) events that plan_passes keeps in every pass.
+inline std::size_t reference_events(std::vector<std::vector<event_def>> const& passes) {
+    if (passes.empty()) return 0;
+    std::size_t n = 0;
+    for (auto const& e : passes.front()) {
+        if (!e.core) continue;
+        bool everywhere = true;
+        for (auto const& p : passes) {
+            bool found = false;
+            for (auto const& x : p) if (x.name == e.name) { found = true; break; }
+            if (!found) { everywhere = false; break; }
+        }
+        if (everywhere) ++n;
+    }
+    return n;
+}
+
 // Kernel's own PMU event aliases, e.g. cache-misses -> event=0x64,umask=0x09.
 // Recorded in the fingerprint so a reader knows what an abstract name meant on
 // the machine that produced the numbers - this differs between vendors and
 // even between microarchitectures from one vendor.
-inline std::map<std::string, std::string> sysfs_aliases() {
+inline std::map<std::string, std::string> sysfs_aliases(
+    std::string const& dir = "/sys/bus/event_source/devices/cpu/events") {
     std::map<std::string, std::string> m;
-    char const* dir = "/sys/bus/event_source/devices/cpu/events";
-    std::string cmd = std::string("ls ") + dir + " 2>/dev/null";
-    if (FILE* p = ::popen(cmd.c_str(), "r")) {
-        char name[256];
-        while (std::fgets(name, sizeof name, p)) {
-            std::string n(name);
-            if (!n.empty() && n.back() == '\n') n.pop_back();
-            if (n.empty()) continue;
-            std::ifstream f(std::string(dir) + "/" + n);
-            std::string v;
-            if (f && std::getline(f, v)) m[n] = v;
-        }
-        ::pclose(p);
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::ifstream f(it->path());
+        std::string v;
+        if (f && std::getline(f, v)) m[it->path().filename().string()] = v;
     }
     return m;
 }

@@ -229,17 +229,17 @@ function fillRunsTable(runs) {
     tr.className = "clickable";
     tr.dataset.id = String(r.id);
     tr.innerHTML = [
-      `<td class="t">${r.id}</td>`,
-      `<td class="t">${r.hostname || "—"}</td>`,
-      `<td class="t"><code title="${r.json_sha}">${shortSha(r.json_sha)}</code></td>`,
-      `<td class="t">${r.compiler || "—"}</td>`,
-      `<td class="t"><code>${r.cxxflags || "—"}</code></td>`,
-      `<td>${r.pin}</td>`,
-      `<td class="t">${r.created_at || "—"}</td>`,
-      `<td>${r.n_samples ?? "—"}</td>`,
+      `<td class="t">${esc(r.id)}</td>`,
+      `<td class="t">${esc(r.hostname || "—")}</td>`,
+      `<td class="t"><code title="${esc(r.json_sha)}">${esc(shortSha(r.json_sha))}</code></td>`,
+      `<td class="t">${esc(r.compiler || "—")}</td>`,
+      `<td class="t"><code>${esc(r.cxxflags || "—")}</code></td>`,
+      `<td>${esc(r.pin)}</td>`,
+      `<td class="t">${esc(r.created_at || "—")}</td>`,
+      `<td>${esc(r.n_samples ?? "—")}</td>`,
       `<td>${fmt(r.median_ins_byte)}</td>`,
       `<td class="${deltaClass(r.median_drift_pct)}">${fmt(r.median_drift_pct)}</td>`,
-      `<td class="t">${r.label || ""}</td>`,
+      `<td class="t">${esc(r.label || "")}</td>`,
     ].join("");
     tr.addEventListener("click", (e) => onRunRowPick(e, r));
     tr.addEventListener("contextmenu", (e) => {
@@ -272,8 +272,8 @@ async function showRun(id) {
   $("#run-detail-title").textContent = `Run ${r.id} · ${r.hostname} · ${shortSha(r.json_sha)}`;
   const m = data.machine || {};
   $("#run-detail-meta").innerHTML =
-    `${m.cpu_model || "?"} (${m.microarch || "?"}) · ${r.compiler} · <code>${r.cxxflags}</code><br>` +
-    `comparability <code>${r.comparability_key}</code> · pin ${r.pin} · ${r.label || ""} ${r.note || ""}`;
+    `${esc(m.cpu_model || "?")} (${esc(m.microarch || "?")}) · ${esc(r.compiler)} · <code>${esc(r.cxxflags)}</code><br>` +
+    `comparability <code>${esc(r.comparability_key)}</code> · pin ${esc(r.pin)} · ${esc(r.label || "")} ${esc(r.note || "")}`;
 
   const heads = ["dataset", "setup", "op", "ins/byte", "cyc/byte", "IPC", "GHz", "MB/s",
                  "pass_drift", "ins_spread", "ns/call", "context-switches"];
@@ -291,9 +291,9 @@ async function showRun(id) {
     const tr = document.createElement("tr");
     const pd = s.pass_drift || 0;
     tr.innerHTML = [
-      `<td class="t">${s.dataset}${pd > 0.005 ? "!" : ""}</td>`,
-      `<td class="t">${s.impl}</td>`,
-      `<td class="t">${s.op}</td>`,
+      `<td class="t">${esc(s.dataset)}${pd > 0.005 ? "!" : ""}</td>`,
+      `<td class="t">${esc(s.impl)}</td>`,
+      `<td class="t">${esc(s.op)}</td>`,
       `<td>${fmt(d["ins/byte"])}</td>`,
       `<td>${fmt(d["cyc/byte"])}</td>`,
       `<td>${fmt(d.IPC)}</td>`,
@@ -322,30 +322,30 @@ async function loadStability() {
   for (const g of groups) {
     const tr = document.createElement("tr");
     tr.innerHTML = [
-      `<td class="t">${g.hostname}</td>`,
-      `<td class="t">${g.dataset}</td>`,
-      `<td class="t">${g.impl}</td>`,
-      `<td class="t">${g.op}</td>`,
-      `<td>${g.n}</td>`,
+      `<td class="t">${esc(g.hostname)}</td>`,
+      `<td class="t">${esc(g.dataset)}</td>`,
+      `<td class="t">${esc(g.impl)}</td>`,
+      `<td class="t">${esc(g.op)}</td>`,
+      `<td>${esc(g.n)}</td>`,
       `<td>${fmt(g.min)}</td>`,
       `<td>${fmt(g.max)}</td>`,
       `<td>${fmt(g.mean)}</td>`,
       `<td class="${cvClass(g.cv_pct)}">${fmt(g.cv_pct)}</td>`,
       `<td class="${(g.mean_pass_drift || 0) > 0.005 ? "warn" : ""}">${fmt(g.mean_pass_drift, 4)}</td>`,
       `<td>${fmt(g.mean_ins_spread, 4)}</td>`,
-      `<td class="t"><code>${shortSha(g.json_sha)}</code></td>`,
+      `<td class="t"><code>${esc(shortSha(g.json_sha))}</code></td>`,
     ].join("");
     tb.appendChild(tr);
   }
   const xb = $("#stab-xhost tbody");
   xb.innerHTML = "";
   for (const x of data.cross_host || []) {
-    const hosts = (x.hosts || []).map((h) => `${h.hostname} ${fmt(h.mean)}`).join(", ");
+    const hosts = (x.hosts || []).map((h) => `${esc(h.hostname)} ${fmt(h.mean)}`).join(", ");
     const tr = document.createElement("tr");
     tr.innerHTML = [
-      `<td class="t">${x.dataset}</td>`,
-      `<td class="t">${x.impl}</td>`,
-      `<td class="t">${x.op}</td>`,
+      `<td class="t">${esc(x.dataset)}</td>`,
+      `<td class="t">${esc(x.impl)}</td>`,
+      `<td class="t">${esc(x.op)}</td>`,
       `<td class="t">${hosts}</td>`,
       `<td class="${cvClass(x.cv_pct)}">${fmt(x.cv_pct)}</td>`,
       `<td class="t">${x.comparable ? "same key" : "keys differ — cycles incomparable"}</td>`,
@@ -678,11 +678,11 @@ async function compareSelected() {
   $("#score-summary").hidden = false;
   $("#score-num").textContent = fmt(data.score);
   $("#score-within").textContent = fmt(data.within_1pct, 1) + "%";
-  $("#score-reg").textContent = data.regressions;
+  $("#score-reg").textContent = String(data.regressions);
   const br = data.base || {}, cr = data.cand || {};
   $("#score-who").innerHTML =
     `<div class="score-runs">${scoreRunCard("baseline", br, cr)}${scoreRunCard("candidate", cr, br)}</div>` +
-    (data.comparable ? "" : `<p class="score-warn">Different machines — cycle columns are diagnostic only.</p>`);
+    (data.warnings || []).map((w) => `<p class="score-warn">${esc(w)}</p>`).join("");
   await ensureScoreTables();
   fillScoreBlock("parse", (data.blocks && data.blocks.parse) || []);
   fillScoreBlock("serialize", (data.blocks && data.blocks.serialize) || []);

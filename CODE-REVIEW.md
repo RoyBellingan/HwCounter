@@ -10,6 +10,35 @@ Do not treat Stability CV as evidence until spread math is fixed.
 
 19 findings: 4 high, 8 medium, 7 low.
 
+## Status 2026-09-17
+
+All 19 items are addressed in the working tree. `make test` (Boost.Test,
+24 cases) covers the invariants listed in M8.
+
+| Item | Fix |
+|---|---|
+| H1 | Score default baseline requires same compiler + cxxflags (same host first); none → error. Response has `instructions_comparable` and `warnings`. On the real DB, cand #15 (-O2) had picked #14 (-march=native -flto); now #10. |
+| H2 | `instruction_key` (compiler) in machine.json. `report.py diff` exits 2 when compiler or cxxflags differ (`--force` to gate anyway). |
+| H3 | Spread = `(max − min) / min` per pass, worst pass; order-independent (`perf::min_max`). |
+| H4 | New CSV columns `best_ipc`, `best_ghz` from the best-time rep; `derived.hpp` and `report.py` use them, fall back for old CSVs. |
+| M1 | `path_within()` compares path elements. |
+| M2 | `app.js` escapes every server string; `report.py html` escapes machine fields and cells. |
+| M3 | Slot probe uses distinct supported events. Planner demotes core events when slots are too few (never > slots per pass); `selfcheck` warns. |
+| M4 | `serve` refuses to start without token unless `--allow-open-writes`; `$HWC_TOKEN` / `--token-file`; constant-time compare; `--max-body-mb` (413); bounded connections; accept errors no longer unwind the frame the threads reference. Makefile passes the token by env. Bind stays 0.0.0.0 (UAT needs it). |
+| M5 | `report.py diff --max-drift 0.5` skips and lists drifting rows. `json_perf` still exits 0 (decision). |
+| M6 | `runs.median_ins_byte / median_drift_pct / n_samples` stored on insert, back-filled on open; `list_runs` reads no samples. `busy_timeout` 5 s. Values identical to the old computation on the real DB (15 runs). |
+| M7 | Documented: GHz = user cycles / task-clock ns. |
+| M8 | `test/unit_tests.cpp`, `make test`. |
+| L1 | No `popen`: gethostname, uname, sched_getaffinity, filesystem, in-process MD5 (fingerprint output identical). |
+| L2 | Full RFC 8259 escape. |
+| L3 | RFC 4180 quoting; ioctl / read errors throw. |
+| L4 | `web/vendor/` with versions and sha256 in `VERSIONS.txt`. |
+| L5 | SHA prefix filter needs ≥ 7 chars; `metrics()` scans all samples via `json_each`; unique `(run_id, dataset, impl, op)` (skipped with a warning if old data has duplicates). |
+| L6 | Dead `out` removed; selfcheck fails on pin failure and walks the whole CPU mask; includes; stale comment. |
+| L7 | `[v6]:port` URLs; push has 30 s connect / 60 s I/O timeouts. |
+
+Still open: the experiments in "Open questions" below.
+
 ---
 
 ## What holds

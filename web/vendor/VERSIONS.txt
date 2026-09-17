@@ -1,0 +1,15 @@
+Vendored copies, served by `hwc serve` so the UI works without a CDN.
+Source: cdn.jsdelivr.net, downloaded 2026-09-17.
+
+jquery.min.js      jquery@3.7.1
+select2.min.js     select2@4.1.0-rc.0
+select2.min.css    select2@4.1.0-rc.0
+tabulator.min.js   tabulator-tables@6.3.1
+tabulator.min.css  tabulator-tables@6.3.1
+
+sha256:
+fc9a93dd241f6b045cbff0481cf4e1901becd0e12fb45166a8f17f95823f0b1a  jquery.min.js
+cda4a81c187015d95ed2c71f1841540b08203cdec5fa2a7d5d1825a3c2166f8c  select2.min.css
+f7244fff610595b944f76bf3080d74e3af42b5dd234f8f079e698cc39ac966b0  select2.min.js
+a46d8051944c745cae8a7976b4fb9d93d894d20876a4521cc4f6f035cfef52ea  tabulator.min.css
+e952272c3b2afa4ebb60cef5db8cbe9cbaabaa52b50c3cd3d22993ca5215a6ff  tabulator.min.js

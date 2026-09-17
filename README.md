@@ -22,6 +22,7 @@ MB/s delta           ±2.5%           <- report only
 make json-src                        # Boost.JSON at e93cf9c (UAT baseline)
 make
 make selfcheck                       # is this machine trustworthy?
+make test                            # Boost.Test unit tests (no perf access needed)
 make bench                           # run it + write <OUT>.meta.json
 make short                           # quick compare
 make maxy                            # every counter
@@ -36,11 +37,11 @@ One Beast binary, two subcommands. Runners POST; the collector host also uses
 ```sh
 # on the collector host
 export HWC_TOKEN=change-me
-make serve TOKEN="$HWC_TOKEN" BIND=0.0.0.0 PORT=8080
+make serve BIND=0.0.0.0 PORT=8080     # token from $HWC_TOKEN
 # UI: http://<host>:8080   views: Runs / Stability / Score
 
 # seed the two pre-SHA 6pack CSVs (label=historical, json_sha=unknown)
-make seed-historical TOKEN="$HWC_TOKEN" PUSH_URL=http://127.0.0.1:8080
+make seed-historical PUSH_URL=http://127.0.0.1:8080
 
 # on every runner, including the collector host
 make json-src
@@ -48,13 +49,23 @@ make selfcheck
 for i in 1 2 3; do
   make bench-push OUT=results/uat-$i \
     JSON_SHA=e93cf9c254619142b9f3cfa9022b93fb1d4e5edb \
-    PUSH_URL=http://<collector>:8080 TOKEN="$HWC_TOKEN"
+    PUSH_URL=http://<collector>:8080
 done
 ```
 
-`POST /api/runs` requires `Authorization: Bearer …` when `--token` is set, and
-rejects a body that is missing `json_sha` or `cxxflags`. Reads are open on the
-LAN. Payload is one JSON object `{meta, machine, rows}` — not multipart.
+`hwc serve` does not start without a write token (`$HWC_TOKEN`, `--token-file`
+or `--token`) unless you pass `--allow-open-writes` (`make serve OPEN_WRITES=1`).
+The Makefile gives the token to `hwc` through the environment, so `ps` does not
+show it. `POST /api/runs` requires `Authorization: Bearer …`, rejects a body over
+`--max-body-mb` (default 8), and rejects a body that is missing `json_sha` or
+`cxxflags`. Reads are open on the LAN. Payload is one JSON object
+`{meta, machine, rows}` — not multipart. The UI libraries (jQuery, Select2,
+Tabulator) are vendored in `web/vendor/`; the UI needs no CDN.
+
+Score picks its default baseline only from runs with the **same compiler and
+`cxxflags`** as the candidate (same host first). If you pick two runs by hand
+that differ, the compare response carries `warnings` and
+`instructions_comparable: false`.
 
 SQLite lives at `data/hwc.sqlite` by default (WAL). Volume is small.
 
@@ -96,12 +107,18 @@ Consequences, enforced by the tooling rather than left to discipline:
 2. Every result set ships with `<out>.machine.json` — CPU model, family/model/
    stepping, kernel, compiler, SMT state, L3 topology, detected PMU slot count,
    the kernel's own event→encoding aliases, and the list of missing events.
-3. `report.py diff` compares the two runs' **comparability keys** (vendor,
-   family, model, stepping, kernel). If they differ it suppresses cycle and
-   cache deltas and reports only instructions, which is the one metric that
-   survives a change of machine.
-4. PMU slot count is **detected at runtime**, not assumed, by opening N events
-   and asking the kernel whether it had to multiplex.
+3. Comparability has two tiers:
+   - **instructions** need the same compiler (`instruction_key` in
+     machine.json) and the same `cxxflags` (meta.json). `report.py diff`
+     refuses to gate (exit 2) when these differ, unless `--force`.
+   - **cycles / cache / TLB** also need the same **comparability key** (vendor,
+     family, model, stepping, kernel). If it differs, `diff` suppresses those
+     deltas and reports only instructions.
+4. PMU slot count is **detected at runtime**, not assumed, by opening N
+   distinct events and asking the kernel whether it had to multiplex. With
+   too few slots for both core events, `cycles` (then `instructions`) is
+   rotated like other events and `selfcheck` warns that the stitch check is
+   limited.
 
 So: gate on instructions across your fleet; treat cycles/cache/TLB as
 machine-local diagnostics.
@@ -121,7 +138,15 @@ That row is flagged with `!` rather than quietly averaged.
 Two columns report this separately:
 
 - `pass_drift` — disagreement between per-pass *best* counts. Stitch integrity.
-- `ins_spread` — run-to-run noise within a pass. Machine stability.
+- `ins_spread` — run-to-run noise within a pass, `(max − min) / min` over the
+  reps of each pass (worst pass). Machine stability. Does not depend on the
+  order of the reps.
+
+Per-event columns are the minimum over all reps, so two columns can come from
+different reps. Ratios must not mix them: `best_ipc` and `best_ghz` are
+computed from the one rep with the best wall time, and `IPC` / `GHz` in the
+reports use them when present. `GHz` is user-mode cycles per task-clock ns;
+task-clock includes kernel time, so it is not the clock frequency of the part.
 
 This is not theoretical: it caught a genuine ~1% drift on `apache_builds.json`
 with default storage (but not with pool storage), because default-storage parse
@@ -186,11 +211,16 @@ tools/write_meta.py         identity sidecar (json_sha, cxxflags, pin, times)
 raw columns stay exactly as measured and formulas can be revised without
 re-running the benchmark.
 
-`diff` — regression gate. Exits non-zero over threshold:
+`diff` — regression gate. Exit 1 over threshold, exit 2 when the builds
+(compiler / cxxflags) differ:
 
 ```sh
-./tools/report.py diff baseline.csv results.csv -t 1.0
+./tools/report.py diff baseline.csv results.csv -t 1.0 --max-drift 0.5
 ```
+
+Rows whose `pass_drift` is above `--max-drift` (percent, either side) are
+listed as SKIPPED and not gated, so stitch drift does not use up the
+threshold.
 
 `html` — standalone self-contained page, sticky header, no external assets.
 

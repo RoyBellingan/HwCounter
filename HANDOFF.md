@@ -28,10 +28,10 @@ make
 make selfcheck
 # collector host
 export HWC_TOKEN=change-me
-make serve TOKEN="$HWC_TOKEN"
+make serve                    # reads $HWC_TOKEN
 # other terminal / other machines
 for i in 1 2 3; do
-  make bench-push OUT=results/uat-$i PUSH_URL=http://127.0.0.1:8080 TOKEN="$HWC_TOKEN"
+  make bench-push OUT=results/uat-$i PUSH_URL=http://127.0.0.1:8080
 done
 ```
 
@@ -68,7 +68,7 @@ geomean ≈ 1.000, 100% of rows within ±1%. Token-less POST → 401; empty
 make selfcheck                       # verify the machine first, always
 make json-src                        # Boost.JSON @ e93cf9c
 make bench                           # full run + <OUT>.meta.json
-make bench-push PUSH_URL=http://host:8080 TOKEN=$HWC_TOKEN
+make bench-push PUSH_URL=http://host:8080      # reads $HWC_TOKEN
 make short                           # quick table
 make maxy                            # all 30 columns
 make html                            # standalone page
@@ -155,6 +155,9 @@ reporter so formulas can be revised without re-running the benchmark.
 `GHz` is worth calling out: it is `cycles / task-clock-ns`, both of which we
 already count. It reads the achieved clock straight off the counters, which makes
 throttling a *column* rather than an inference. No extra measurement needed.
+Caveat (review M7): cycles are user-mode only and task-clock includes kernel
+time, so kernel work in the loop also lowers it. New CSVs take `IPC` and `GHz`
+from one rep (`best_ipc`, `best_ghz`), not from minima of different reps.
 
 ---
 

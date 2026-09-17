@@ -6,7 +6,10 @@
 #include <boost/beast.hpp>
 #include <boost/json.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +37,9 @@ struct Cfg {
     unsigned short port = 8080;
     std::string token;
     std::string web = "web";
+    bool allow_open_writes = false;
+    std::uint64_t max_body = 8u << 20;   // bytes; a UAT push is ~100 KB
+    int max_conns = 64;
 };
 
 std::string mime_of(std::string const& path) {
@@ -42,6 +48,7 @@ std::string mime_of(std::string const& path) {
     if (path.ends_with(".css"))  return "text/css; charset=utf-8";
     if (path.ends_with(".json")) return "application/json";
     if (path.ends_with(".svg"))  return "image/svg+xml";
+    if (path.ends_with(".txt"))  return "text/plain; charset=utf-8";
     return "application/octet-stream";
 }
 
@@ -74,9 +81,7 @@ bool write_ok(http::request<http::string_body> const& req, Cfg const& cfg) {
     if (cfg.token.empty()) return true;
     auto it = req.find(http::field::authorization);
     if (it == req.end()) return false;
-    std::string v(it->value());
-    std::string want = "Bearer " + cfg.token;
-    return v == want;
+    return constant_time_equal(it->value(), "Bearer " + cfg.token);
 }
 
 Query query_from(std::unordered_map<std::string, std::string> const& q) {
@@ -103,7 +108,7 @@ serve_static(std::string path, Cfg const& cfg, unsigned ver) {
         return err_res(http::status::not_found, "web root missing", ver);
     root = fs::weakly_canonical(root);
     fs::path full = fs::weakly_canonical(root / path.substr(1));
-    if (full.string().rfind(root.string(), 0) != 0)
+    if (!path_within(root, full))
         return err_res(http::status::bad_request, "bad path", ver);
     if (!fs::exists(full) || !fs::is_regular_file(full))
         return err_res(http::status::not_found, "not found", ver);
@@ -180,11 +185,18 @@ void set_sock_timeout(tcp::socket& sock, std::chrono::seconds sec) {
 void session(tcp::socket sock, Store& store, Cfg const& cfg, std::mutex& mu) {
     set_sock_timeout(sock, std::chrono::seconds(15));
     beast::flat_buffer buffer;
-    http::request<http::string_body> req;
+    http::request_parser<http::string_body> parser;
+    parser.body_limit(cfg.max_body);
     try {
-        http::read(sock, buffer, req);
+        beast::error_code ec;
+        http::read(sock, buffer, parser, ec);
         http::response<http::string_body> res;
-        {
+        if (ec == http::error::body_limit) {
+            res = err_res(http::status::payload_too_large, "request body too large", 11);
+        } else if (ec) {
+            throw beast::system_error(ec);
+        } else {
+            auto const& req = parser.get();
             std::lock_guard<std::mutex> lock(mu);
             res = handle(req, store, cfg);
         }
@@ -200,6 +212,7 @@ void session(tcp::socket sock, Store& store, Cfg const& cfg, std::mutex& mu) {
 
 int cmd_serve(int argc, char** argv) {
     Cfg cfg;
+    std::string token_file;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -209,15 +222,38 @@ int cmd_serve(int argc, char** argv) {
         else if (a == "--bind")  cfg.bind = next();
         else if (a == "--port")  cfg.port = static_cast<unsigned short>(std::stoi(next()));
         else if (a == "--token") cfg.token = next();
+        else if (a == "--token-file") token_file = next();
         else if (a == "--web")   cfg.web = next();
+        else if (a == "--allow-open-writes") cfg.allow_open_writes = true;
+        else if (a == "--max-body-mb")
+            cfg.max_body = std::uint64_t(std::stoul(next())) << 20;
+        else if (a == "--max-conns") cfg.max_conns = std::max(1, std::stoi(next()));
         else if (a == "--help" || a == "-h") {
-            std::cout << "hwc serve --db data/hwc.sqlite --bind 0.0.0.0 --port 8080 "
-                         "--token TOKEN --web web\n";
+            std::cout <<
+                "hwc serve [--db data/hwc.sqlite] [--bind 0.0.0.0] [--port 8080] [--web web]\n"
+                "          [--token-file FILE | --token TOKEN] [--allow-open-writes]\n"
+                "          [--max-body-mb 8] [--max-conns 64]\n"
+                "  The write token comes from --token-file, then --token, then $HWC_TOKEN.\n"
+                "  Without a token the server does not start, unless --allow-open-writes.\n";
             return 0;
         } else {
             std::cerr << "unknown option: " << a << "\n";
             return 2;
         }
+    }
+    if (!token_file.empty()) {
+        std::ifstream f(token_file);
+        if (!f) { std::cerr << "cannot read token file " << token_file << "\n"; return 2; }
+        std::getline(f, cfg.token);
+        while (!cfg.token.empty() && (cfg.token.back() == '\r' || cfg.token.back() == ' '))
+            cfg.token.pop_back();
+    }
+    if (cfg.token.empty())
+        if (char const* env = std::getenv("HWC_TOKEN")) cfg.token = env;
+    if (cfg.token.empty() && !cfg.allow_open_writes) {
+        std::cerr << "hwc serve: no write token. Set HWC_TOKEN, --token-file or --token,\n"
+                     "           or pass --allow-open-writes to accept POSTs from anyone.\n";
+        return 2;
     }
 
     Store store(cfg.db);
@@ -228,19 +264,42 @@ int cmd_serve(int argc, char** argv) {
     std::cerr << "hwc serve  http://" << cfg.bind << ":" << cfg.port
               << "  db=" << cfg.db << "  web=" << cfg.web;
     if (cfg.token.empty())
-        std::cerr << "  (writes open — set --token for UAT)\n";
+        std::cerr << "  (WRITES OPEN: --allow-open-writes)\n";
     else
         std::cerr << "  (writes require token)\n";
 
     // Browsers open several connections at once; a blocking one-at-a-time
-    // loop lets an idle socket stall the whole UI. Store is not thread-safe.
+    // loop lets an idle socket stall the whole UI. Store is not thread-safe,
+    // so handlers run under `mu`.
+    //
+    // This loop never returns: the detached threads hold references to
+    // store, cfg and mu on this stack frame. Accept errors (for example
+    // EMFILE) are logged and retried, never thrown out of this function.
     std::mutex mu;
+    std::atomic<int> active{0};
     for (;;) {
         tcp::socket sock{ioc};
-        acc.accept(sock);
-        std::thread([&store, &cfg, &mu, sock = std::move(sock)]() mutable {
-            session(std::move(sock), store, cfg, mu);
-        }).detach();
+        beast::error_code ec;
+        acc.accept(sock, ec);
+        if (ec) {
+            std::cerr << "accept: " << ec.message() << "\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        if (active.load() >= cfg.max_conns) {
+            sock.close(ec);
+            continue;
+        }
+        ++active;
+        try {
+            std::thread([&store, &cfg, &mu, &active, sock = std::move(sock)]() mutable {
+                session(std::move(sock), store, cfg, mu);
+                --active;
+            }).detach();
+        } catch (std::exception const& e) {
+            --active;
+            std::cerr << "thread: " << e.what() << "\n";
+        }
     }
 }
 

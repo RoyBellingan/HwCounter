@@ -6,6 +6,8 @@
 #include <boost/beast.hpp>
 #include <boost/json.hpp>
 
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -41,8 +43,9 @@ int cmd_push(int argc, char** argv) {
         if      (a == "--url")   url = next();
         else if (a == "--token") token = next();
         else if (a == "--help" || a == "-h") {
-            std::cout << "hwc push --url http://host:8080 --token TOKEN <prefix>\n"
-                         "  reads <prefix>.csv, <prefix>.machine.json, <prefix>.meta.json\n";
+            std::cout << "hwc push --url http://host:8080 [--token TOKEN] <prefix>\n"
+                         "  reads <prefix>.csv, <prefix>.machine.json, <prefix>.meta.json\n"
+                         "  token: --token, else $HWC_TOKEN (preferred: not visible in ps)\n";
             return 0;
         } else if (a.rfind("--", 0) == 0) {
             std::cerr << "unknown option: " << a << "\n";
@@ -51,6 +54,8 @@ int cmd_push(int argc, char** argv) {
             prefix = a;
         }
     }
+    if (token.empty())
+        if (char const* env = std::getenv("HWC_TOKEN")) token = env;
     if (url.empty() || prefix.empty()) {
         std::cerr << "usage: hwc push --url http://host:8080 --token TOKEN <prefix>\n";
         return 2;
@@ -83,10 +88,14 @@ int cmd_push(int argc, char** argv) {
     tcp::resolver resolver{ioc};
     beast::tcp_stream stream{ioc};
     auto const results = resolver.resolve(u.host, u.port);
+    // Without a deadline a dropped SYN or a stuck server blocks CI forever.
+    stream.expires_after(std::chrono::seconds(30));
     stream.connect(results);
 
     http::request<http::string_body> req{http::verb::post, u.path, 11};
-    req.set(http::field::host, u.host);
+    req.set(http::field::host,
+            u.host.find(':') != std::string::npos ? "[" + u.host + "]:" + u.port
+                                                  : u.host + ":" + u.port);
     req.set(http::field::user_agent, "hwc-push");
     req.set(http::field::content_type, "application/json");
     if (!token.empty())
@@ -94,6 +103,7 @@ int cmd_push(int argc, char** argv) {
     req.body() = std::move(payload);
     req.prepare_payload();
 
+    stream.expires_after(std::chrono::seconds(60));
     http::write(stream, req);
     beast::flat_buffer buffer;
     http::response<http::string_body> res;

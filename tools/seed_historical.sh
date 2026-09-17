@@ -1,8 +1,8 @@
 #!/bin/sh
 # POST the two pre-SHA baseline CSVs. json_sha=unknown so UAT views ignore them.
+# The write token comes from $HWC_TOKEN (hwc push reads it).
 set -eu
 url=${1:-http://127.0.0.1:8080}
-token=${2:-}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
@@ -37,5 +37,5 @@ write_hist results/baseline/runA-busy-hot historical \
 write_hist results/baseline/runB-idle historical \
     "pre-SHA capture; 6pack idle"
 
-./hwc push --url "$url" --token "$token" results/baseline/runA-busy-hot
-./hwc push --url "$url" --token "$token" results/baseline/runB-idle
+./hwc push --url "$url" results/baseline/runA-busy-hot
+./hwc push --url "$url" results/baseline/runB-idle

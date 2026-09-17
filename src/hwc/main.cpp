@@ -6,9 +6,9 @@
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: hwc serve|push [options]\n"
-                     "  hwc serve --db data/hwc.sqlite --bind 0.0.0.0 --port 8080 "
-                     "--token TOKEN --web web\n"
-                     "  hwc push  --url http://host:8080 --token TOKEN <prefix>\n";
+                     "  HWC_TOKEN=... hwc serve --db data/hwc.sqlite --bind 0.0.0.0 --port 8080 --web web\n"
+                     "  HWC_TOKEN=... hwc push  --url http://host:8080 <prefix>\n"
+                     "  (see: hwc serve --help, hwc push --help)\n";
         return 2;
     }
     if (std::strcmp(argv[1], "serve") == 0) return hwc::cmd_serve(argc - 1, argv + 1);

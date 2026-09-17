@@ -105,11 +105,18 @@ public:
     void disable() { ioctl_group(PERF_EVENT_IOC_DISABLE); }
 
     reading read() const {
+        if (fds_.empty()) throw std::runtime_error("read from empty perf group");
         // Group layout: nr, time_enabled, time_running, value[nr]
         std::vector<std::uint64_t> buf(3 + fds_.size());
         ssize_t n = ::read(fds_.front(), buf.data(), buf.size() * sizeof(buf[0]));
+        if (n < 0)
+            throw std::runtime_error(std::string("read from perf group failed: ") +
+                                     std::strerror(errno));
         if (n != ssize_t(buf.size() * sizeof(buf[0])))
             throw std::runtime_error("short read from perf group");
+        if (buf[0] != fds_.size())
+            throw std::runtime_error("perf group returned " + std::to_string(buf[0]) +
+                                     " values, expected " + std::to_string(fds_.size()));
 
         reading r;
         r.time_enabled = buf[1];
@@ -119,9 +126,13 @@ public:
     }
 
 private:
+    // A failed ENABLE would otherwise read back as zeros, which a report
+    // cannot tell from real data. Fail loudly instead.
     void ioctl_group(unsigned long req) {
         if (fds_.empty()) return;
-        ::ioctl(fds_.front(), req, PERF_IOC_FLAG_GROUP);
+        if (::ioctl(fds_.front(), req, PERF_IOC_FLAG_GROUP) == -1)
+            throw std::runtime_error("perf ioctl(0x" + hex(req) + ") failed: " +
+                                     std::strerror(errno));
     }
     static std::string hex(std::uint64_t v) {
         char b[32]; std::snprintf(b, sizeof b, "%llx", (unsigned long long)v);

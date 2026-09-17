@@ -5,7 +5,8 @@
 #   make json-src        clone/checkout Boost.JSON at JSON_SHA
 #   make bench           run json_perf and write <OUT>.meta.json
 #   make bench-push      bench, then POST to the collector
-#   make serve           start the Beast collector
+#   make serve           start the Beast collector (needs TOKEN or HWC_TOKEN)
+#   make test            build and run the Boost.Test unit tests
 #
 # Boost.JSON sources are expected at $(JSON_ROOT); override on the command line:
 #   make bench JSON_ROOT=/path/to/boostorg/json
@@ -29,7 +30,10 @@ JSON_REF  ?= uat-baseline
 JSON_URL  ?= https://github.com/boostorg/json.git
 
 PUSH_URL  ?= http://127.0.0.1:8080
-TOKEN     ?=
+# The token goes to hwc through the environment, not argv, so `ps` does not
+# show it. OPEN_WRITES=1 starts the collector without a token.
+TOKEN     ?= $(HWC_TOKEN)
+OPEN_WRITES ?=
 WEB       ?= web
 DB        ?= data/hwc.sqlite
 PORT      ?= 8080
@@ -37,9 +41,9 @@ BIND      ?= 0.0.0.0
 
 export JSON_ROOT JSON_SHA JSON_REF CXX CXXFLAGS PIN MINMS REPS LABEL NOTE OUT DATA
 
-BINS := bench/selfcheck bench/json_perf examples/cache_demo hwc
+BINS := bench/selfcheck bench/json_perf examples/cache_demo hwc test/unit_tests
 
-all: $(BINS)
+all: bench/selfcheck bench/json_perf examples/cache_demo hwc
 
 bench/selfcheck: bench/selfcheck.cpp $(wildcard include/perf/*.hpp)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $<
@@ -53,6 +57,13 @@ examples/cache_demo: examples/cache_demo.cpp $(wildcard include/perf/*.hpp)
 HWC_SRC := src/hwc/main.cpp src/hwc/serve.cpp src/hwc/push.cpp src/hwc/store.cpp src/hwc/json_src.cpp
 hwc: $(HWC_SRC) $(wildcard include/hwc/*.hpp)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -pthread -o $@ $(HWC_SRC) -lsqlite3 $(JSON_LIB)
+
+HWC_LIB_SRC := src/hwc/store.cpp src/hwc/json_src.cpp
+test/unit_tests: test/unit_tests.cpp $(HWC_LIB_SRC) $(wildcard include/perf/*.hpp) $(wildcard include/hwc/*.hpp)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ test/unit_tests.cpp $(HWC_LIB_SRC) -lsqlite3 $(JSON_LIB)
+
+test: test/unit_tests
+	@./test/unit_tests --log_level=message
 
 selfcheck: bench/selfcheck
 	@./bench/selfcheck
@@ -69,22 +80,26 @@ bench: bench/json_perf
 	./tools/run_bench.sh
 
 bench-push: bench hwc
-	./hwc push --url "$(PUSH_URL)" --token "$(TOKEN)" "$(OUT)"
+	@echo './hwc push --url "$(PUSH_URL)" "$(OUT)"'
+	@HWC_TOKEN="$(TOKEN)" ./hwc push --url "$(PUSH_URL)" "$(OUT)"
 
 serve: hwc
-	./hwc serve --db "$(DB)" --bind "$(BIND)" --port "$(PORT)" --token "$(TOKEN)" --web "$(WEB)"
+	@echo './hwc serve --db "$(DB)" --bind "$(BIND)" --port "$(PORT)" --web "$(WEB)"'
+	@HWC_TOKEN="$(TOKEN)" ./hwc serve --db "$(DB)" --bind "$(BIND)" --port "$(PORT)" \
+	  --web "$(WEB)" $(if $(OPEN_WRITES),--allow-open-writes)
 
 seed-historical: hwc
-	./tools/seed_historical.sh "$(PUSH_URL)" "$(TOKEN)"
+	@HWC_TOKEN="$(TOKEN)" ./tools/seed_historical.sh "$(PUSH_URL)"
 
 short: ; @./tools/report.py short $(OUT).csv
 maxy:  ; @./tools/report.py maxy  $(OUT).csv
 html:  ; @./tools/report.py html  $(OUT).csv -o $(OUT).html
 
 THRESH ?= 1.0
-diff:  ; @./tools/report.py diff baseline.csv $(OUT).csv -t $(THRESH)
+MAXDRIFT ?= 0.5
+diff:  ; @./tools/report.py diff baseline.csv $(OUT).csv -t $(THRESH) --max-drift $(MAXDRIFT)
 
 clean:
 	rm -f $(BINS) $(OUT).csv $(OUT).machine.json $(OUT).meta.json $(OUT).html
 
-.PHONY: all selfcheck json-src bench bench-push serve seed-historical short maxy html diff clean
+.PHONY: all test selfcheck json-src bench bench-push serve seed-historical short maxy html diff clean

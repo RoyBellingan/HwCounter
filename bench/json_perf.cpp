@@ -93,12 +93,8 @@ std::size_t parse_null_parser(std::string const& s) {
 
 struct serializer_fixture {
     json::value v;
-    std::string out;
-    explicit serializer_fixture(std::string const& s) : v(json::parse(s)) {
-        out.reserve(s.size() * 2);
-    }
+    explicit serializer_fixture(std::string const& s) : v(json::parse(s)) {}
     std::size_t run() {
-        out.clear();
         json::serializer sr;
         sr.reset(&v);
         char buf[4096];
@@ -139,6 +135,15 @@ int main(int argc, char** argv) {
         std::cerr << "usage: json_perf [options] <file.json|dir>...\n";
         return 2;
     }
+    if (!(min_ms > 0) || reps < 1) {
+        std::cerr << "--min-ms must be > 0 and --reps must be >= 1\n";
+        return 2;
+    }
+    if (ops.find_first_not_of("ps") != std::string::npos ||
+        ops.find_first_of("ps") == std::string::npos) {
+        std::cerr << "--ops takes p, s or ps\n";
+        return 2;
+    }
 
     if (pin_cpu >= 0) {
         cpu_set_t s;
@@ -169,7 +174,9 @@ int main(int argc, char** argv) {
 
     std::cerr << "cpu        : " << mi.cpu_model << "  (" << mi.microarch << ")\n"
               << "kernel     : " << mi.kernel << "   paranoid=" << mi.paranoid << "\n"
-              << "pmu slots  : " << mi.pmu_slots << "\n"
+              << "pmu slots  : " << mi.pmu_slots
+              << "  (reference events per pass: "
+              << perf::reference_events(sess.passes()) << ")\n"
               << "events     : " << sess.event_count() << " supported, "
               << mi.unsupported.size() << " unavailable\n"
               << "passes     : " << sess.passes().size()
